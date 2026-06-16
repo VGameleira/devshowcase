@@ -1,75 +1,164 @@
 <?php
-include_once '../config/headers.php';
-include_once '../config/database.php';
+/**
+ * API de Projetos — CRUD completo.
+ *
+ * GET    /projects.php       → Lista todos os projetos
+ * GET    /projects.php?id=X  → Retorna um projeto específico
+ * POST   /projects.php       → Cria um novo projeto (requer token)
+ * PUT    /projects.php       → Atualiza um projeto existente (requer token)
+ * DELETE /projects.php       → Remove um projeto (requer token)
+ */
+
+require_once __DIR__ . '/../config/headers.php';
+require_once __DIR__ . '/../config/database.php';
 
 $database = new Database();
-$db = $database->getConnection();
+$db       = $database->getConnection();
+$method   = $_SERVER['REQUEST_METHOD'];
 
-$method = $_SERVER['REQUEST_METHOD'];
+switch ($method) {
 
-switch($method) {
+    // ──────────────────────────────────────────────
+    // LISTAR / DETALHAR
+    // ──────────────────────────────────────────────
     case 'GET':
-        // Listar Projetos
-        $id = isset($_GET['id']) ? $_GET['id'] : die();
-        $query = "SELECT * FROM projects";
-        if($id) {
-            $query .= " WHERE id = :id LIMIT 1";
-        }
-        $query .= " ORDER BY created_at DESC";
-        
-        $stmt = $db->prepare($query);
-        if($id) $stmt->bindParam(':id', $id);
-        $stmt->execute();
-        
-        $projects = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        echo json_encode($projects);
-        break;
+        $id = isset($_GET['id']) ? (int) $_GET['id'] : null;
 
-    case 'POST':
-        // Criar Projeto
-        $data = json_decode(file_get_contents("php://input"));
-        
-        if(!empty($data->titulo) && !empty($data->descricao)) {
-            $query = "INSERT INTO projects SET titulo=:titulo, descricao=:descricao, tecnologias=:tecnologias, categoria=:categoria, link_github=:link_github, link_demo=:link_demo, destaque=:destaque, status=:status";
-            $stmt = $db->prepare($query);
-            
-            $stmt->bindParam(":titulo", $data->titulo);
-            $stmt->bindParam(":descricao", $data->descricao);
-            $stmt->bindParam(":tecnologias", $data->tecnologias);
-            $stmt->bindParam(":categoria", $data->categoria);
-            $stmt->bindParam(":link_github", $data->link_github);
-            $stmt->bindParam(":link_demo", $data->link_demo);
-            $stmt->bindParam(":destaque", $data->destaque);
-            $stmt->bindParam(":status", $data->status);
-            
-            if($stmt->execute()) {
-                http_response_code(201);
-                echo json_encode(["message" => "Projeto criado com sucesso."]);
-            } else {
-                http_response_code(503);
-                echo json_encode(["message" => "Erro ao criar projeto."]);
+        if ($id) {
+            // Projeto específico
+            $stmt = $db->prepare('SELECT * FROM projects WHERE id = :id LIMIT 1');
+            $stmt->bindParam(':id', $id, PDO::PARAM_INT);
+            $stmt->execute();
+            $project = $stmt->fetch();
+
+            if (!$project) {
+                http_response_code(404);
+                echo json_encode(['error' => true, 'message' => 'Projeto não encontrado.']);
+                exit;
             }
+
+            http_response_code(200);
+            echo json_encode($project);
         } else {
-            http_response_code(400);
-            echo json_encode(["message" => "Dados incompletos."]);
+            // Lista completa, do mais recente primeiro
+            $stmt = $db->query('SELECT * FROM projects ORDER BY created_at DESC');
+            $projects = $stmt->fetchAll();
+
+            http_response_code(200);
+            echo json_encode($projects);
         }
         break;
 
-    case 'DELETE':
-        // Deletar Projeto
-        $data = json_decode(file_get_contents("php://input"));
-        if(!empty($data->id)) {
-            $query = "DELETE FROM projects WHERE id = :id";
-            $stmt = $db->prepare($query);
-            $stmt->bindParam(":id", $data->id);
-            
-            if($stmt->execute()) {
-                http_response_code(200);
-                echo json_encode(["message" => "Projeto deletado."]);
-            }
+    // ──────────────────────────────────────────────
+    // CRIAR
+    // ──────────────────────────────────────────────
+    case 'POST':
+        require_once __DIR__ . '/middleware.php';
+        requireAuth();
+
+        $data = json_decode(file_get_contents('php://input'));
+
+        if (empty($data->titulo) || empty($data->descricao)) {
+            http_response_code(400);
+            echo json_encode(['error' => true, 'message' => 'Título e descrição são obrigatórios.']);
+            exit;
         }
+
+        $stmt = $db->prepare('
+            INSERT INTO projects (titulo, descricao, tecnologias, categoria, link_github, link_demo, destaque, status)
+            VALUES (:titulo, :descricao, :tecnologias, :categoria, :link_github, :link_demo, :destaque, :status)
+        ');
+
+        $stmt->execute([
+            ':titulo'      => $data->titulo,
+            ':descricao'   => $data->descricao,
+            ':tecnologias' => $data->tecnologias ?? '',
+            ':categoria'   => $data->categoria   ?? '',
+            ':link_github' => $data->link_github ?? '',
+            ':link_demo'   => $data->link_demo   ?? '',
+            ':destaque'    => !empty($data->destaque) ? 1 : 0,
+            ':status'      => $data->status ?? 'ativo',
+        ]);
+
+        http_response_code(201);
+        echo json_encode([
+            'error'   => false,
+            'message' => 'Projeto criado com sucesso.',
+            'id'      => $db->lastInsertId(),
+        ]);
         break;
-        
-    // (O PUT seria semelhante ao POST, adicionando o WHERE id = :id)
+
+    // ──────────────────────────────────────────────
+    // ATUALIZAR
+    // ──────────────────────────────────────────────
+    case 'PUT':
+        require_once __DIR__ . '/middleware.php';
+        requireAuth();
+
+        $data = json_decode(file_get_contents('php://input'));
+
+        if (empty($data->id)) {
+            http_response_code(400);
+            echo json_encode(['error' => true, 'message' => 'ID do projeto é obrigatório.']);
+            exit;
+        }
+
+        $stmt = $db->prepare('
+            UPDATE projects
+            SET titulo = :titulo,
+                descricao = :descricao,
+                tecnologias = :tecnologias,
+                categoria = :categoria,
+                link_github = :link_github,
+                link_demo = :link_demo,
+                destaque = :destaque,
+                status = :status
+            WHERE id = :id
+        ');
+
+        $stmt->execute([
+            ':id'          => (int) $data->id,
+            ':titulo'      => $data->titulo,
+            ':descricao'   => $data->descricao,
+            ':tecnologias' => $data->tecnologias ?? '',
+            ':categoria'   => $data->categoria   ?? '',
+            ':link_github' => $data->link_github ?? '',
+            ':link_demo'   => $data->link_demo   ?? '',
+            ':destaque'    => !empty($data->destaque) ? 1 : 0,
+            ':status'      => $data->status ?? 'ativo',
+        ]);
+
+        http_response_code(200);
+        echo json_encode(['error' => false, 'message' => 'Projeto atualizado com sucesso.']);
+        break;
+
+    // ──────────────────────────────────────────────
+    // DELETAR
+    // ──────────────────────────────────────────────
+    case 'DELETE':
+        require_once __DIR__ . '/middleware.php';
+        requireAuth();
+
+        $data = json_decode(file_get_contents('php://input'));
+
+        if (empty($data->id)) {
+            http_response_code(400);
+            echo json_encode(['error' => true, 'message' => 'ID do projeto é obrigatório.']);
+            exit;
+        }
+
+        $stmt = $db->prepare('DELETE FROM projects WHERE id = :id');
+        $stmt->execute([':id' => (int) $data->id]);
+
+        http_response_code(200);
+        echo json_encode(['error' => false, 'message' => 'Projeto removido com sucesso.']);
+        break;
+
+    // ──────────────────────────────────────────────
+    // MÉTODO NÃO SUPORTADO
+    // ──────────────────────────────────────────────
+    default:
+        http_response_code(405);
+        echo json_encode(['error' => true, 'message' => 'Método não permitido.']);
+        break;
 }
-?>
